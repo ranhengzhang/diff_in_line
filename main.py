@@ -271,22 +271,38 @@ def parse_and_wrap_lines_robust(raw_text, width):
             if i > 0: commit_line()
             if not sub_line: continue
 
-            idx = 0
-            while idx < len(sub_line):
+            remaining_text = sub_line
+            while remaining_text:
                 space_left = width - current_line_len
+
+                # 如果当前行已满，先换行
                 if space_left <= 0:
                     commit_line()
                     space_left = width
 
-                chunk = sub_line[idx: idx + space_left]
+                # 尝试根据剩余视觉空间截取字符串
+                chunk, chunk_width = cut_string_by_width(remaining_text, space_left)
+
+                # === 关键边界情况处理 ===
+                # 如果 chunk 为空，但 remaining_text 不为空，说明剩余空间连 1 个字符都放不下
+                # (例如：剩1格空间，但下一个字符是中文，占2格)
+                if not chunk and remaining_text:
+                    commit_line()
+                    space_left = width
+                    # 换行后重新截取
+                    chunk, chunk_width = cut_string_by_width(remaining_text, space_left)
 
                 if token_id != 0:
                     if token_id not in id_to_line_map:
                         id_to_line_map[token_id] = len(wrapped_lines)
 
                 current_line_content.append((chunk, t_type, token_id))
-                current_line_len += len(chunk)
-                idx += len(chunk)
+
+                # 【修复】这里使用真实的视觉宽度累加
+                current_line_len += chunk_width
+
+                # 推进字符串
+                remaining_text = remaining_text[len(chunk):]
 
     if current_line_content:
         commit_line()
@@ -339,6 +355,22 @@ def draw_footer_status(stdscr, max_y, max_x, real_pos):
             stdscr.addstr(max_y - 1, start_x, pos_str, status_color)
     except curses.error:
         pass
+
+
+def cut_string_by_width(text, max_width):
+    """
+    从 text 开头截取一段字符串，使其视觉宽度不超过 max_width。
+    返回: (截取的字符串, 截取部分的视觉宽度)
+    """
+    width = 0
+    for i, char in enumerate(text):
+        # 使用你上一轮添加的 get_visual_width 计算单个字符宽度
+        # 如果上一轮为了简单直接写在了 main 里，建议把 get_visual_width 提出来作为全局函数
+        cw = get_visual_width(char)
+        if width + cw > max_width:
+            return text[:i], width
+        width += cw
+    return text, width
 
 
 def get_visual_width(text):
