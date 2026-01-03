@@ -25,6 +25,7 @@ def get_git_diff(repo_path, file_rel_path):
     cmd = [
         'git', '-C', repo_path, 'diff',
         '--word-diff=plain',
+        # 保持你要求的正则不变
         r'--word-diff-regex=(\W\w+)*\W',
         '--no-color',
         '--unified=0',
@@ -38,11 +39,84 @@ def get_git_diff(repo_path, file_rel_path):
     except Exception as e:
         return str(e)
 
+def get_common_prefix_len(s1, s2):
+    """计算两个字符串的公共前缀长度"""
+    length = min(len(s1), len(s2))
+    for i in range(length):
+        if s1[i] != s2[i]:
+            return i
+    return length
+
+def get_common_suffix_len(s1, s2):
+    """计算两个字符串的公共后缀长度"""
+    length = min(len(s1), len(s2))
+    if length == 0: return 0
+    for i in range(length):
+        if s1[-(i+1)] != s2[-(i+1)]:
+            return i
+    return length
+
+def optimize_tokens(raw_tokens):
+    """
+    核心优化逻辑：合并相邻的 Delete 和 Add，提取公共首尾。
+    输入 raw_tokens: list of (type, text)
+       type: 0=Normal, 1=Delete, 2=Add
+    """
+    optimized = []
+    i = 0
+    while i < len(raw_tokens):
+        curr_type, curr_text = raw_tokens[i]
+
+        # 检查是否是 Delete (1) 且下一个是 Add (2)
+        if curr_type == 1 and i + 1 < len(raw_tokens):
+            next_type, next_text = raw_tokens[i+1]
+
+            if next_type == 2:
+                # 发现相邻的 Delete + Add，尝试提取公共部分
+                p_len = get_common_prefix_len(curr_text, next_text)
+                s_len = get_common_suffix_len(curr_text, next_text)
+
+                # 防止重叠：如果前缀+后缀超过了原本长度，优先保留前缀，减少后缀长度
+                max_len = min(len(curr_text), len(next_text))
+                if p_len + s_len > max_len:
+                    s_len = max_len - p_len
+
+                # 只有当确实有公共部分时才拆分
+                if p_len > 0 or s_len > 0:
+                    prefix = curr_text[:p_len]
+                    suffix = curr_text[len(curr_text)-s_len:] if s_len > 0 else ""
+
+                    mid_del = curr_text[p_len : len(curr_text)-s_len]
+                    mid_add = next_text[p_len : len(next_text)-s_len]
+
+                    # 1. 添加公共前缀 (Normal)
+                    if prefix:
+                        optimized.append((0, prefix))
+
+                    # 2. 添加中间差异部分 (Delete & Add)
+                    if mid_del:
+                        optimized.append((1, mid_del))
+                    if mid_add:
+                        optimized.append((2, mid_add))
+
+                    # 3. 添加公共后缀 (Normal)
+                    if suffix:
+                        optimized.append((0, suffix))
+
+                    # 跳过下一个 token，因为已经处理了
+                    i += 2
+                    continue
+
+        # 如果没有触发合并逻辑，直接添加
+        optimized.append((curr_type, curr_text))
+        i += 1
+
+    return optimized
+
 def parse_and_wrap_lines_robust(raw_text, width):
     """
-    解析并折行。
+    解析、优化并折行。
     """
-
     # === 1. 预处理：剥离 Git 头部元数据 ===
     header_patterns = [
         r'^diff --git .*(\n|$)',
@@ -51,24 +125,40 @@ def parse_and_wrap_lines_robust(raw_text, width):
         r'^\+\+\+ .*(\n|$)',
         r'^@@ .*? @@(\n|$)'
     ]
-
     for pat in header_patterns:
         raw_text = re.sub(pat, '', raw_text, flags=re.MULTILINE)
-
     if raw_text.startswith('\n'):
         raw_text = raw_text.lstrip('\n')
 
-    # === 2. 开始解析 ===
+    # === 2. 初始 Token化 (Type, CleanText) ===
+    # 将原始字符串转化为结构化列表，不再携带括号
+    pattern = re.compile(r'(\[-[\s\S]*?-\]|\{\+[\s\S]*?\+\})')
+    raw_split = pattern.split(raw_text)
+
+    parsed_tokens = []
+    for token in raw_split:
+        if not token: continue
+
+        if token.startswith('[-') and token.endswith('-]'):
+            # Type 1: Delete
+            parsed_tokens.append((1, token[2:-2]))
+        elif token.startswith('{+') and token.endswith('+}'):
+            # Type 2: Add
+            parsed_tokens.append((2, token[2:-2]))
+        else:
+            # Type 0: Normal
+            parsed_tokens.append((0, token))
+
+    # === 3. 执行优化逻辑 (提取公共首尾) ===
+    final_tokens_data = optimize_tokens(parsed_tokens)
+
+    # === 4. 开始构建显示行和 ID ===
     wrapped_lines = []
     navigable_ids = []
     id_to_line_map = {}
     id_to_real_pos = {}
 
     next_change_id = 1
-
-    pattern = re.compile(r'(\[-[\s\S]*?-\]|\{\+[\s\S]*?\+\})')
-    tokens = pattern.split(raw_text)
-
     current_line_content = []
     current_line_len = 0
 
@@ -94,25 +184,21 @@ def parse_and_wrap_lines_robust(raw_text, width):
         else:
             real_col += len(text_content)
 
-    for token in tokens:
-        if not token: continue
+    # 遍历优化后的 token 列表
+    for t_type, t_text in final_tokens_data:
+        # 重新包装为显示文本 (带括号)
+        # 这样 main 函数里的渲染逻辑 (检测 [- ... ]) 才能继续工作
+        display_token = t_text
+        if t_type == 1:
+            display_token = f"[-{t_text}-]"
+        elif t_type == 2:
+            display_token = f"{{+{t_text}+}}"
 
-        color_type = 0
         token_id = 0
-        is_current_token_change = False
+        is_change = (t_type != 0)
 
-        clean_text = token
-
-        if token.startswith('[-') and token.endswith('-]'):
-            color_type = 1 # Red
-            is_current_token_change = True
-            clean_text = ""
-        elif token.startswith('{+') and token.endswith('+}'):
-            color_type = 2 # Green
-            is_current_token_change = True
-            clean_text = token[2:-2]
-
-        if is_current_token_change:
+        # ID 分配与合并逻辑
+        if is_change:
             if last_was_change:
                 token_id = current_active_id
             else:
@@ -125,24 +211,23 @@ def parse_and_wrap_lines_robust(raw_text, width):
             token_id = 0
             last_was_change = False
 
+        # 记录真实坐标 (ID 对应位置)
         if token_id != 0 and token_id not in id_to_real_pos:
             id_to_real_pos[token_id] = (real_row, real_col)
 
-        if clean_text:
-            update_real_pos(clean_text)
+        # 更新坐标 (普通文本和新增文本推进光标)
+        if t_type == 0 or t_type == 2:
+            update_real_pos(t_text)
 
-        sub_lines = token.split('\n')
-
+        # 折行逻辑
+        sub_lines = display_token.split('\n')
         for i, sub_line in enumerate(sub_lines):
-            if i > 0:
-                commit_line()
-
+            if i > 0: commit_line()
             if not sub_line: continue
 
             idx = 0
             while idx < len(sub_line):
                 space_left = width - current_line_len
-
                 if space_left <= 0:
                     commit_line()
                     space_left = width
@@ -153,8 +238,7 @@ def parse_and_wrap_lines_robust(raw_text, width):
                     if token_id not in id_to_line_map:
                         id_to_line_map[token_id] = len(wrapped_lines)
 
-                current_line_content.append((chunk, color_type, token_id))
-
+                current_line_content.append((chunk, t_type, token_id))
                 current_line_len += len(chunk)
                 idx += len(chunk)
 
@@ -222,15 +306,9 @@ def main(stdscr, repo_path, rel_path, abs_path):
     curses.init_pair(2, curses.COLOR_GREEN, -1) # Green text (新增)
     curses.init_pair(3, curses.COLOR_CYAN, -1)  # UI
 
-    # 4-7: 聚焦模式 (Explicit Focused Colors)
-    # 为了保证颜色对比，这里不再依赖 REVERSE，而是直接定义 (前景, 背景)
-    # 你的需求：括号/符号是白色，内容是黑色，背景是原本的红/绿
-
-    # Focused Delete (Red Background)
+    # 4-7: 聚焦模式
     curses.init_pair(4, curses.COLOR_BLACK, curses.COLOR_RED) # 删除标记 [- -]
     curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_RED) # 删除内容
-
-    # Focused Add (Green Background)
     curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_GREEN) # 新增标记 {+ +}
     curses.init_pair(7, curses.COLOR_WHITE, curses.COLOR_GREEN) # 新增内容
 
@@ -298,63 +376,50 @@ def main(stdscr, repo_path, rel_path, abs_path):
             if line_idx >= len(lines): break
 
             draw_y = i + header_height
-            current_x = 2 # Initial indentation
+            current_x = 2
 
-            # 画左侧箭头
             if line_idx == target_start_line and target_id is not None:
                 stdscr.addstr(draw_y, 0, ">", curses.A_BOLD | curses.color_pair(3))
 
-            # 遍历当前行的文本片段
             for text, color_code, segment_id in lines[line_idx]:
-                # 截断超长文本
                 if current_x + len(text) > max_x:
                     text_to_draw = text[:max_x - current_x - 1]
                 else:
                     text_to_draw = text
 
-                # === 核心逻辑修改：分段绘制 ===
                 is_focused = (segment_id == target_id and segment_id is not None and segment_id != 0)
 
                 if is_focused:
-                    # 确定配色对
-                    if color_code == 1: # Delete (Red)
+                    if color_code == 1:
                         marker_pair = curses.color_pair(4) | curses.A_BOLD
-                        content_pair = curses.color_pair(5) # Black on Red
-                    elif color_code == 2: # Add (Green)
+                        content_pair = curses.color_pair(5)
+                    elif color_code == 2:
                         marker_pair = curses.color_pair(6) | curses.A_BOLD
-                        content_pair = curses.color_pair(7) # Black on Green
+                        content_pair = curses.color_pair(7)
                     else:
                         marker_pair = curses.color_pair(0)
                         content_pair = curses.color_pair(0)
 
-                    # 分割字符串进行绘制： markers 使用 marker_pair，内容使用 content_pair
-                    # 逻辑：检查头部标记 -> 绘制 -> 切掉; 检查尾部标记 -> 切掉 -> 绘制内容 -> 绘制尾部
-
                     temp_text = text_to_draw
 
-                    # 1. 绘制头部标记 [- 或 {+
                     if temp_text.startswith('[-') or temp_text.startswith('{+'):
-                        # 标记部分 (前2个字符)
                         try:
                             stdscr.addstr(draw_y, current_x, temp_text[:2], marker_pair)
                             current_x += 2
                             temp_text = temp_text[2:]
                         except curses.error: pass
 
-                    # 2. 检查尾部标记 -] 或 +}
                     suffix = ""
                     if temp_text.endswith('-]') or temp_text.endswith('+}'):
                         suffix = temp_text[-2:]
-                        temp_text = temp_text[:-2] # 剩下的就是纯内容
+                        temp_text = temp_text[:-2]
 
-                    # 3. 绘制中间的内容 (使用黑色字体)
                     if temp_text:
                         try:
                             stdscr.addstr(draw_y, current_x, temp_text, content_pair)
                             current_x += len(temp_text)
                         except curses.error: pass
 
-                    # 4. 绘制尾部标记 (使用白色字体)
                     if suffix:
                         try:
                             stdscr.addstr(draw_y, current_x, suffix, marker_pair)
@@ -362,7 +427,6 @@ def main(stdscr, repo_path, rel_path, abs_path):
                         except curses.error: pass
 
                 else:
-                    # === 非聚焦状态 (保持原样) ===
                     attrs = curses.color_pair(color_code)
                     try:
                         stdscr.addstr(draw_y, current_x, text_to_draw, attrs)
@@ -415,7 +479,7 @@ if __name__ == "__main__":
         readline.parse_and_bind("tab: complete")
         readline.set_completer(lambda t, s: (glob.glob(t + '*') + [None])[s])
 
-    print("--- Git 单行文件 Diff 查看器 ---")
+    print("--- Git 单行文件 Diff 查看器 (智能优化版) ---")
 
     while True:
         target = ""
