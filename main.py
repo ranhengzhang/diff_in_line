@@ -25,7 +25,6 @@ def get_git_diff(repo_path, file_rel_path):
     cmd = [
         'git', '-C', repo_path, 'diff',
         '--word-diff=plain',
-        # 保持你要求的正则不变
         r'--word-diff-regex=(\W\w+)*\W',
         '--no-color',
         '--unified=0',
@@ -40,7 +39,6 @@ def get_git_diff(repo_path, file_rel_path):
         return str(e)
 
 def get_common_prefix_len(s1, s2):
-    """计算两个字符串的公共前缀长度"""
     length = min(len(s1), len(s2))
     for i in range(length):
         if s1[i] != s2[i]:
@@ -48,7 +46,6 @@ def get_common_prefix_len(s1, s2):
     return length
 
 def get_common_suffix_len(s1, s2):
-    """计算两个字符串的公共后缀长度"""
     length = min(len(s1), len(s2))
     if length == 0: return 0
     for i in range(length):
@@ -58,66 +55,104 @@ def get_common_suffix_len(s1, s2):
 
 def optimize_tokens(raw_tokens):
     """
-    核心优化逻辑：合并相邻的 Delete 和 Add，提取公共首尾。
-    输入 raw_tokens: list of (type, text)
-       type: 0=Normal, 1=Delete, 2=Add
+    Types:
+    0: Normal
+    1: Delete [- -]
+    2: Add {+ +}
+    31: Move Backward (< <)  [Add ... Delete]
+    32: Move Forward (> >)   [Delete ... Add]
+    33: Move Context (Bridge) [中间连接部分]
     """
-    optimized = []
+
+    # === Phase 1: Global Split (细粒度化) ===
+    split_tokens = []
     i = 0
     while i < len(raw_tokens):
         curr_type, curr_text = raw_tokens[i]
 
-        # 检查是否是 Delete (1) 且下一个是 Add (2)
-        if curr_type == 1 and i + 1 < len(raw_tokens):
+        if (curr_type == 1 or curr_type == 2) and i + 1 < len(raw_tokens):
             next_type, next_text = raw_tokens[i+1]
 
-            if next_type == 2:
-                # 发现相邻的 Delete + Add，尝试提取公共部分
+            if (next_type == 1 or next_type == 2) and curr_type != next_type:
                 p_len = get_common_prefix_len(curr_text, next_text)
                 s_len = get_common_suffix_len(curr_text, next_text)
 
-                # 防止重叠：如果前缀+后缀超过了原本长度，优先保留前缀，减少后缀长度
                 max_len = min(len(curr_text), len(next_text))
                 if p_len + s_len > max_len:
                     s_len = max_len - p_len
 
-                # 只有当确实有公共部分时才拆分
                 if p_len > 0 or s_len > 0:
                     prefix = curr_text[:p_len]
                     suffix = curr_text[len(curr_text)-s_len:] if s_len > 0 else ""
 
-                    mid_del = curr_text[p_len : len(curr_text)-s_len]
-                    mid_add = next_text[p_len : len(next_text)-s_len]
+                    mid_curr = curr_text[p_len : len(curr_text)-s_len]
+                    mid_next = next_text[p_len : len(next_text)-s_len]
 
-                    # 1. 添加公共前缀 (Normal)
-                    if prefix:
-                        optimized.append((0, prefix))
+                    if prefix: split_tokens.append((0, prefix))
+                    if mid_curr: split_tokens.append((curr_type, mid_curr))
+                    if mid_next: split_tokens.append((next_type, mid_next))
+                    if suffix: split_tokens.append((0, suffix))
 
-                    # 2. 添加中间差异部分 (Delete & Add)
-                    if mid_del:
-                        optimized.append((1, mid_del))
-                    if mid_add:
-                        optimized.append((2, mid_add))
-
-                    # 3. 添加公共后缀 (Normal)
-                    if suffix:
-                        optimized.append((0, suffix))
-
-                    # 跳过下一个 token，因为已经处理了
                     i += 2
                     continue
 
-        # 如果没有触发合并逻辑，直接添加
-        optimized.append((curr_type, curr_text))
+        split_tokens.append((curr_type, curr_text))
         i += 1
 
-    return optimized
+    # === Phase 2: Move Detection (移动检测 & 桥接) ===
+    # 这一步我们将 List 转为可变的，直接在上面修改类型
+    temp_tokens = list(split_tokens)
+    processed_indices = set()
+
+    for i in range(len(temp_tokens)):
+        if i in processed_indices: continue
+
+        curr_type, curr_text = temp_tokens[i]
+
+        if curr_type == 1 or curr_type == 2:
+            target_type = 2 if curr_type == 1 else 1
+            match_index = -1
+
+            # 向后搜索匹配项
+            search_limit = 60 # 搜索范围
+            for j in range(i + 1, min(len(temp_tokens), i + search_limit)):
+                if j in processed_indices: continue
+
+                scan_type, scan_text = temp_tokens[j]
+
+                # 找到完全匹配的异类
+                if scan_type == target_type and scan_text == curr_text:
+                    match_index = j
+                    break
+
+            if match_index != -1:
+                # 标记起点和终点
+                processed_indices.add(i)
+                processed_indices.add(match_index)
+
+                move_type = 32 if curr_type == 1 else 31
+
+                temp_tokens[i] = (move_type, curr_text)
+                temp_tokens[match_index] = (move_type, curr_text)
+
+                # === 关键修改：桥接中间部分 ===
+                # 将 i 和 match_index 之间的所有 Token 标记为 Type 33 (Context)
+                # 这样 ID 生成器就会把它们视为同一个 Change Block 的一部分
+                for k in range(i + 1, match_index):
+                    mid_type, mid_text = temp_tokens[k]
+                    # 我们只修改类型，保留文本
+                    # 注意：如果中间原本是 Delete/Add，这里会被覆盖为 Context，
+                    # 视为移动操作的一部分（即“包含在移动块内部的杂音”）
+                    temp_tokens[k] = (33, mid_text)
+                    processed_indices.add(k)
+
+    return temp_tokens
 
 def parse_and_wrap_lines_robust(raw_text, width):
     """
     解析、优化并折行。
     """
-    # === 1. 预处理：剥离 Git 头部元数据 ===
+    # 1. 剥离头部
     header_patterns = [
         r'^diff --git .*(\n|$)',
         r'^index .*(\n|$)',
@@ -130,29 +165,24 @@ def parse_and_wrap_lines_robust(raw_text, width):
     if raw_text.startswith('\n'):
         raw_text = raw_text.lstrip('\n')
 
-    # === 2. 初始 Token化 (Type, CleanText) ===
-    # 将原始字符串转化为结构化列表，不再携带括号
+    # 2. 初始拆分
     pattern = re.compile(r'(\[-[\s\S]*?-\]|\{\+[\s\S]*?\+\})')
     raw_split = pattern.split(raw_text)
 
     parsed_tokens = []
     for token in raw_split:
         if not token: continue
-
         if token.startswith('[-') and token.endswith('-]'):
-            # Type 1: Delete
-            parsed_tokens.append((1, token[2:-2]))
+            parsed_tokens.append((1, token[2:-2])) # Delete
         elif token.startswith('{+') and token.endswith('+}'):
-            # Type 2: Add
-            parsed_tokens.append((2, token[2:-2]))
+            parsed_tokens.append((2, token[2:-2])) # Add
         else:
-            # Type 0: Normal
-            parsed_tokens.append((0, token))
+            parsed_tokens.append((0, token))       # Normal
 
-    # === 3. 执行优化逻辑 (提取公共首尾) ===
+    # 3. 智能优化
     final_tokens_data = optimize_tokens(parsed_tokens)
 
-    # === 4. 开始构建显示行和 ID ===
+    # 4. 构建行数据
     wrapped_lines = []
     navigable_ids = []
     id_to_line_map = {}
@@ -184,20 +214,25 @@ def parse_and_wrap_lines_robust(raw_text, width):
         else:
             real_col += len(text_content)
 
-    # 遍历优化后的 token 列表
     for t_type, t_text in final_tokens_data:
-        # 重新包装为显示文本 (带括号)
-        # 这样 main 函数里的渲染逻辑 (检测 [- ... ]) 才能继续工作
+        # 格式化显示文本
         display_token = t_text
         if t_type == 1:
             display_token = f"[-{t_text}-]"
         elif t_type == 2:
             display_token = f"{{+{t_text}+}}"
+        elif t_type == 31: # Move Backward
+            display_token = f"(<{t_text}<)"
+        elif t_type == 32: # Move Forward
+            display_token = f"(>{t_text}>)"
+        # Type 33 (Context) 和 Type 0 (Normal) 不加修饰
 
         token_id = 0
+        # 只要类型不是 0，就属于 Change 块的一部分
+        # Type 33 (Context) 也是非 0，所以它会延续上一个 Change ID
         is_change = (t_type != 0)
 
-        # ID 分配与合并逻辑
+        # ID 合并逻辑
         if is_change:
             if last_was_change:
                 token_id = current_active_id
@@ -211,15 +246,12 @@ def parse_and_wrap_lines_robust(raw_text, width):
             token_id = 0
             last_was_change = False
 
-        # 记录真实坐标 (ID 对应位置)
         if token_id != 0 and token_id not in id_to_real_pos:
             id_to_real_pos[token_id] = (real_row, real_col)
 
-        # 更新坐标 (普通文本和新增文本推进光标)
-        if t_type == 0 or t_type == 2:
-            update_real_pos(t_text)
+        update_real_pos(t_text)
 
-        # 折行逻辑
+        # 折行
         sub_lines = display_token.split('\n')
         for i, sub_line in enumerate(sub_lines):
             if i > 0: commit_line()
@@ -248,7 +280,6 @@ def parse_and_wrap_lines_robust(raw_text, width):
     return wrapped_lines, navigable_ids, id_to_line_map, id_to_real_pos
 
 def draw_header(stdscr, max_x, rel_path, current_idx, total_changes):
-    """绘制头部 (2行)"""
     header_color = curses.color_pair(3) | curses.A_REVERSE
 
     progress_str = f" Change: {current_idx}/{total_changes} "
@@ -265,52 +296,53 @@ def draw_header(stdscr, max_x, rel_path, current_idx, total_changes):
     line1 = f"{prefix}{display_path}"
     padding = " " * (max_x - len(line1) - len(progress_str))
     full_line1 = line1 + padding + progress_str
-
     line2 = " [←/→]:Prev/Next  [↑/↓]:Scroll  [Esc]:New File  [q]:Quit "
-    if len(line2) < max_x:
-        line2 += " " * (max_x - len(line2))
-    else:
-        line2 = line2[:max_x]
+    if len(line2) < max_x: line2 += " " * (max_x - len(line2))
+    else: line2 = line2[:max_x]
 
     try:
         stdscr.addstr(0, 0, full_line1[:max_x], header_color)
         stdscr.addstr(1, 0, line2[:max_x], header_color)
-    except curses.error:
-        pass
+    except curses.error: pass
 
 def draw_footer_status(stdscr, max_y, max_x, real_pos):
-    """绘制底部状态栏"""
-    if not real_pos:
-        pos_str = " Pos: N/A "
-    else:
-        pos_str = f" Ln {real_pos[0]}, Col {real_pos[1]} "
+    if not real_pos: pos_str = " Pos: N/A "
+    else: pos_str = f" Ln {real_pos[0]}, Col {real_pos[1]} "
 
     status_color = curses.color_pair(3) | curses.A_REVERSE | curses.A_BOLD
-
     try:
         stdscr.move(max_y - 1, 0)
         stdscr.clrtoeol()
         start_x = max_x - len(pos_str)
         if start_x >= 0:
             stdscr.addstr(max_y - 1, start_x, pos_str, status_color)
-    except curses.error:
-        pass
+    except curses.error: pass
 
 def main(stdscr, repo_path, rel_path, abs_path):
     curses.start_color()
     curses.use_default_colors()
 
-    # === 定义配色方案 ===
-    # 1-3: 普通模式 (非聚焦)
-    curses.init_pair(1, curses.COLOR_RED, -1)   # Red text (删除)
-    curses.init_pair(2, curses.COLOR_GREEN, -1) # Green text (新增)
-    curses.init_pair(3, curses.COLOR_CYAN, -1)  # UI
+    # === 配色方案 ===
+    # 1-3: 普通 / UI
+    curses.init_pair(1, curses.COLOR_RED, -1)
+    curses.init_pair(2, curses.COLOR_GREEN, -1)
+    curses.init_pair(3, curses.COLOR_CYAN, -1)
 
-    # 4-7: 聚焦模式
-    curses.init_pair(4, curses.COLOR_BLACK, curses.COLOR_RED) # 删除标记 [- -]
+    # 4-7: 聚焦模式 (删除/新增)
+    curses.init_pair(4, curses.COLOR_BLACK, curses.COLOR_RED) # 删除标记
     curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_RED) # 删除内容
-    curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_GREEN) # 新增标记 {+ +}
+    curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_GREEN) # 新增标记
     curses.init_pair(7, curses.COLOR_WHITE, curses.COLOR_GREEN) # 新增内容
+
+    # === 8-10: 移动 (Move) 配色 ===
+    # 8: Unfocused Move (Blue text)
+    curses.init_pair(8, curses.COLOR_BLUE, -1)
+
+    # 9: Focused Move Content (White on Blue)
+    curses.init_pair(9, curses.COLOR_WHITE, curses.COLOR_BLUE)
+
+    # 10: Focused Move Symbols (Black on Blue)
+    curses.init_pair(10, curses.COLOR_BLACK, curses.COLOR_BLUE)
 
     curses.curs_set(0)
 
@@ -341,20 +373,17 @@ def main(stdscr, repo_path, rel_path, abs_path):
     current_idx = 0
     scroll_offset = 0
     auto_scroll = True
-
     header_height = 2
     footer_height = 1
 
     while True:
         stdscr.clear()
         max_y, max_x = stdscr.getmaxyx()
-
         page_size = max_y - header_height - footer_height
         if page_size < 1: page_size = 1
 
         target_id = change_ids[current_idx]
         target_start_line = id_map.get(target_id, 0)
-
         current_real_pos = real_pos_map.get(target_id)
 
         if auto_scroll:
@@ -365,12 +394,10 @@ def main(stdscr, repo_path, rel_path, abs_path):
         if scroll_offset > len(lines) - page_size: scroll_offset = len(lines) - page_size
         if scroll_offset < 0: scroll_offset = 0
 
-        # Draw Header
-        display_idx = current_idx + 1 if target_id is not None else 0
-        total_changes = len(change_ids) if target_id is not None else 0
-        draw_header(stdscr, max_x, rel_path, display_idx, total_changes)
+        draw_header(stdscr, max_x, rel_path,
+                    current_idx=(current_idx+1 if target_id else 0),
+                    total_changes=(len(change_ids) if target_id else 0))
 
-        # Draw Content
         for i in range(page_size):
             line_idx = scroll_offset + i
             if line_idx >= len(lines): break
@@ -389,75 +416,107 @@ def main(stdscr, repo_path, rel_path, abs_path):
 
                 is_focused = (segment_id == target_id and segment_id is not None and segment_id != 0)
 
+                # === 核心渲染逻辑 ===
+                attrs = 0
+
+                # 1. 聚焦状态
                 if is_focused:
-                    if color_code == 1:
-                        marker_pair = curses.color_pair(4) | curses.A_BOLD
-                        content_pair = curses.color_pair(5)
-                    elif color_code == 2:
-                        marker_pair = curses.color_pair(6) | curses.A_BOLD
-                        content_pair = curses.color_pair(7)
+                    # 分类处理：移动内容 vs 中间普通文本
+
+                    if color_code == 33:
+                        # === 特殊：移动块中间的普通文本 ===
+                        # 即使聚焦，也按普通文本绘制 (无背景色)
+                        try:
+                            stdscr.addstr(draw_y, current_x, text_to_draw, curses.color_pair(0))
+                            current_x += len(text_to_draw)
+                        except curses.error: pass
+
+                    elif color_code in [1, 2, 31, 32]:
+                        # === 真正需要高亮的部分 (移动首尾、删除、新增) ===
+
+                        # 定义配色对 (Marker, Content)
+                        if color_code == 31 or color_code == 32: # Move
+                            marker_pair = curses.color_pair(10) | curses.A_BOLD # Black on Blue
+                            content_pair = curses.color_pair(9) # White on Blue
+                        elif color_code == 1: # Delete
+                            marker_pair = curses.color_pair(4) | curses.A_BOLD
+                            content_pair = curses.color_pair(5)
+                        elif color_code == 2: # Add
+                            marker_pair = curses.color_pair(6) | curses.A_BOLD
+                            content_pair = curses.color_pair(7)
+
+                        temp_text = text_to_draw
+
+                        # 绘制前缀: [-, {+, (<, (>
+                        for p in ['[-', '{+', '(<', '(>']:
+                            if temp_text.startswith(p):
+                                try:
+                                    stdscr.addstr(draw_y, current_x, temp_text[:2], marker_pair)
+                                    current_x += 2
+                                    temp_text = temp_text[2:]
+                                except curses.error: pass
+                                break
+
+                        # 绘制后缀: -], +}, <), >)
+                        suffix = ""
+                        for s in ['-]', '+}', '<)', '>)']:
+                            if temp_text.endswith(s):
+                                suffix = s
+                                temp_text = temp_text[:-len(s)]
+                                break
+
+                        # 绘制内容
+                        if temp_text:
+                            try:
+                                stdscr.addstr(draw_y, current_x, temp_text, content_pair)
+                                current_x += len(temp_text)
+                            except curses.error: pass
+
+                        # 绘制后缀
+                        if suffix:
+                            try:
+                                stdscr.addstr(draw_y, current_x, suffix, marker_pair)
+                                current_x += len(suffix)
+                            except curses.error: pass
+
                     else:
-                        marker_pair = curses.color_pair(0)
-                        content_pair = curses.color_pair(0)
-
-                    temp_text = text_to_draw
-
-                    if temp_text.startswith('[-') or temp_text.startswith('{+'):
+                        # 理论上不应该进入这里，除非是 Type 0 且 token_id != 0
                         try:
-                            stdscr.addstr(draw_y, current_x, temp_text[:2], marker_pair)
-                            current_x += 2
-                            temp_text = temp_text[2:]
+                            stdscr.addstr(draw_y, current_x, text_to_draw, curses.color_pair(0))
+                            current_x += len(text_to_draw)
                         except curses.error: pass
 
-                    suffix = ""
-                    if temp_text.endswith('-]') or temp_text.endswith('+}'):
-                        suffix = temp_text[-2:]
-                        temp_text = temp_text[:-2]
-
-                    if temp_text:
-                        try:
-                            stdscr.addstr(draw_y, current_x, temp_text, content_pair)
-                            current_x += len(temp_text)
-                        except curses.error: pass
-
-                    if suffix:
-                        try:
-                            stdscr.addstr(draw_y, current_x, suffix, marker_pair)
-                            current_x += len(suffix)
-                        except curses.error: pass
-
+                # 2. 非聚焦状态
                 else:
-                    attrs = curses.color_pair(color_code)
+                    if color_code == 31 or color_code == 32: # Move Text
+                        attrs = curses.color_pair(8) | curses.A_BOLD # Blue
+                    elif color_code == 33: # Move Context
+                        attrs = curses.color_pair(0) # Normal
+                    else:
+                        attrs = curses.color_pair(color_code)
+
                     try:
                         stdscr.addstr(draw_y, current_x, text_to_draw, attrs)
                         current_x += len(text_to_draw)
-                    except curses.error:
-                        pass
+                    except curses.error: pass
 
-        # Draw Footer
         draw_footer_status(stdscr, max_y, max_x, current_real_pos)
-
         stdscr.refresh()
 
         key = stdscr.getch()
 
-        if key == ord('q'):
-            return False
-        elif key == 27:
-            return True
-
+        if key == ord('q'): return False
+        elif key == 27: return True
         elif key == curses.KEY_RIGHT or key == ord('l'):
             if current_idx < len(change_ids) - 1:
                 current_idx += 1
                 auto_scroll = True
-            else:
-                curses.beep()
+            else: curses.beep()
         elif key == curses.KEY_LEFT or key == ord('h'):
             if current_idx > 0:
                 current_idx -= 1
                 auto_scroll = True
-            else:
-                curses.beep()
+            else: curses.beep()
         elif key == curses.KEY_DOWN or key == ord('j'):
             scroll_offset += 1
             auto_scroll = False
@@ -474,13 +533,10 @@ def main(stdscr, repo_path, rel_path, abs_path):
 if __name__ == "__main__":
     first_run = True
     cli_arg_used = False
-
     if readline:
         readline.parse_and_bind("tab: complete")
         readline.set_completer(lambda t, s: (glob.glob(t + '*') + [None])[s])
-
-    print("--- Git 单行文件 Diff 查看器 (智能优化版) ---")
-
+    print("--- Git 单行文件 Diff 查看器 (Merged Move Block) ---")
     while True:
         target = ""
         if first_run and len(sys.argv) >= 2:
@@ -492,38 +548,21 @@ if __name__ == "__main__":
                     if not first_run: print("")
                     raw_input = input("请输入文件路径: ").strip()
                     target = raw_input.strip("'\"")
-
                     if not target: continue
                     if os.path.exists(target): break
                     print(f"错误: 文件 '{target}' 不存在，请重试。")
                 except KeyboardInterrupt:
-                    print("\n退出。")
-                    sys.exit(0)
-
+                    print("\n退出。"); sys.exit(0)
         first_run = False
-
         abs_file_path = os.path.abspath(target)
         git_root = find_git_root(os.path.dirname(abs_file_path))
-
         if not git_root:
             print(f"错误: 文件 '{target}' 不在 Git 仓库中。")
-            if cli_arg_used:
-                sys.exit(1)
-            else:
-                continue
-
+            if cli_arg_used: sys.exit(1)
+            else: continue
         rel_path = os.path.relpath(abs_file_path, git_root)
-
         try:
             should_continue = curses.wrapper(main, git_root, rel_path, abs_file_path)
-
-            if not should_continue:
-                print("Bye!")
-                break
-            else:
-                cli_arg_used = False
-                pass
-
-        except Exception as e:
-            print(f"程序运行出错: {e}")
-            break
+            if not should_continue: break
+            else: cli_arg_used = False; pass
+        except Exception as e: print(f"程序运行出错: {e}"); break
