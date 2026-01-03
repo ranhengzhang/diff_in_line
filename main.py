@@ -1,15 +1,18 @@
-import sys
-import os
-import subprocess
 import curses
-import re
 import glob
+import os
+import re
+import subprocess
+import sys
+
+import unicodedata
 
 # 尝试导入 readline 以支持 Tab 补全
 try:
     import readline
 except ImportError:
     readline = None
+
 
 def find_git_root(start_path):
     """向上寻找 .git 目录"""
@@ -19,6 +22,7 @@ def find_git_root(start_path):
             return current_path
         current_path = os.path.dirname(current_path)
     return None
+
 
 def get_git_diff(repo_path, file_rel_path):
     """执行 git diff 获取数据"""
@@ -38,6 +42,7 @@ def get_git_diff(repo_path, file_rel_path):
     except Exception as e:
         return str(e)
 
+
 def get_common_prefix_len(s1, s2):
     length = min(len(s1), len(s2))
     for i in range(length):
@@ -45,13 +50,15 @@ def get_common_prefix_len(s1, s2):
             return i
     return length
 
+
 def get_common_suffix_len(s1, s2):
     length = min(len(s1), len(s2))
     if length == 0: return 0
     for i in range(length):
-        if s1[-(i+1)] != s2[-(i+1)]:
+        if s1[-(i + 1)] != s2[-(i + 1)]:
             return i
     return length
+
 
 def optimize_tokens(raw_tokens):
     """
@@ -71,33 +78,39 @@ def optimize_tokens(raw_tokens):
         curr_type, curr_text = raw_tokens[i]
 
         if (curr_type == 1 or curr_type == 2) and i + 1 < len(raw_tokens):
-            next_type, next_text = raw_tokens[i+1]
+            next_type, next_text = raw_tokens[i + 1]
 
             if (next_type == 1 or next_type == 2) and curr_type != next_type:
-                p_len = get_common_prefix_len(curr_text, next_text)
-                s_len = get_common_suffix_len(curr_text, next_text)
+                prefix = ""
+                suffix = ""
+                while len(curr_text) and len(next_text) and curr_text[0] == next_text[0]:
+                    prefix += curr_text[0]
+                    curr_text = curr_text[1:]
+                    next_text = next_text[1:]
+                while len(curr_text) and len(next_text) and curr_text[-1] == next_text[-1]:
+                    suffix = curr_text[-1] + suffix
+                    curr_text = curr_text[:-1]
+                    next_text = next_text[:-1]
 
-                max_len = min(len(curr_text), len(next_text))
-                if p_len + s_len > max_len:
-                    s_len = max_len - p_len
-
-                if p_len > 0 or s_len > 0:
-                    prefix = curr_text[:p_len]
-                    suffix = curr_text[len(curr_text)-s_len:] if s_len > 0 else ""
-
-                    mid_curr = curr_text[p_len : len(curr_text)-s_len]
-                    mid_next = next_text[p_len : len(next_text)-s_len]
-
-                    if prefix: split_tokens.append((0, prefix))
-                    if mid_curr: split_tokens.append((curr_type, mid_curr))
-                    if mid_next: split_tokens.append((next_type, mid_next))
-                    if suffix: split_tokens.append((0, suffix))
+                if len(prefix) > 0 or len(suffix) > 0:
+                    if len(prefix): split_tokens.append((0, prefix))
+                    if len(curr_text): split_tokens.append((curr_type, curr_text))
+                    if len(next_text): split_tokens.append((next_type, next_text))
+                    if len(suffix): split_tokens.append((0, suffix))
 
                     i += 2
                     continue
 
         split_tokens.append((curr_type, curr_text))
         i += 1
+
+    i = 0
+    while i < len(split_tokens) - 1:
+        if split_tokens[i][0] == split_tokens[i + 1][0]:
+            split_tokens[i] = (split_tokens[i][0], split_tokens[i][1] + split_tokens[i + 1][1])
+            split_tokens.pop(i + 1)
+        else:
+            i += 1
 
     # === Phase 2: Move Detection (移动检测 & 桥接) ===
     # 这一步我们将 List 转为可变的，直接在上面修改类型
@@ -114,7 +127,7 @@ def optimize_tokens(raw_tokens):
             match_index = -1
 
             # 向后搜索匹配项
-            search_limit = 60 # 搜索范围
+            search_limit = 60  # 搜索范围
             for j in range(i + 1, min(len(temp_tokens), i + search_limit)):
                 if j in processed_indices: continue
 
@@ -148,6 +161,7 @@ def optimize_tokens(raw_tokens):
 
     return temp_tokens
 
+
 def parse_and_wrap_lines_robust(raw_text, width):
     """
     解析、优化并折行。
@@ -173,11 +187,11 @@ def parse_and_wrap_lines_robust(raw_text, width):
     for token in raw_split:
         if not token: continue
         if token.startswith('[-') and token.endswith('-]'):
-            parsed_tokens.append((1, token[2:-2])) # Delete
+            parsed_tokens.append((1, token[2:-2]))  # Delete
         elif token.startswith('{+') and token.endswith('+}'):
-            parsed_tokens.append((2, token[2:-2])) # Add
+            parsed_tokens.append((2, token[2:-2]))  # Add
         else:
-            parsed_tokens.append((0, token))       # Normal
+            parsed_tokens.append((0, token))  # Normal
 
     # 3. 智能优化
     final_tokens_data = optimize_tokens(parsed_tokens)
@@ -221,9 +235,9 @@ def parse_and_wrap_lines_robust(raw_text, width):
             display_token = f"[-{t_text}-]"
         elif t_type == 2:
             display_token = f"{{+{t_text}+}}"
-        elif t_type == 31: # Move Backward
+        elif t_type == 31:  # Move Backward
             display_token = f"(<{t_text}<)"
-        elif t_type == 32: # Move Forward
+        elif t_type == 32:  # Move Forward
             display_token = f"(>{t_text}>)"
         # Type 33 (Context) 和 Type 0 (Normal) 不加修饰
 
@@ -264,7 +278,7 @@ def parse_and_wrap_lines_robust(raw_text, width):
                     commit_line()
                     space_left = width
 
-                chunk = sub_line[idx : idx + space_left]
+                chunk = sub_line[idx: idx + space_left]
 
                 if token_id != 0:
                     if token_id not in id_to_line_map:
@@ -279,6 +293,7 @@ def parse_and_wrap_lines_robust(raw_text, width):
 
     return wrapped_lines, navigable_ids, id_to_line_map, id_to_real_pos
 
+
 def draw_header(stdscr, max_x, rel_path, current_idx, total_changes):
     header_color = curses.color_pair(3) | curses.A_REVERSE
 
@@ -289,7 +304,7 @@ def draw_header(stdscr, max_x, rel_path, current_idx, total_changes):
     display_path = rel_path
     if len(display_path) > available_len:
         if available_len > 3:
-            display_path = "..." + rel_path[-(available_len-3):]
+            display_path = "..." + rel_path[-(available_len - 3):]
         else:
             display_path = ""
 
@@ -297,17 +312,23 @@ def draw_header(stdscr, max_x, rel_path, current_idx, total_changes):
     padding = " " * (max_x - len(line1) - len(progress_str))
     full_line1 = line1 + padding + progress_str
     line2 = " [←/→]:Prev/Next  [↑/↓]:Scroll  [Esc]:New File  [q]:Quit "
-    if len(line2) < max_x: line2 += " " * (max_x - len(line2))
-    else: line2 = line2[:max_x]
+    if len(line2) < max_x:
+        line2 += " " * (max_x - len(line2))
+    else:
+        line2 = line2[:max_x]
 
     try:
         stdscr.addstr(0, 0, full_line1[:max_x], header_color)
         stdscr.addstr(1, 0, line2[:max_x], header_color)
-    except curses.error: pass
+    except curses.error:
+        pass
+
 
 def draw_footer_status(stdscr, max_y, max_x, real_pos):
-    if not real_pos: pos_str = " Pos: N/A "
-    else: pos_str = f" Ln {real_pos[0]}, Col {real_pos[1]} "
+    if not real_pos:
+        pos_str = " Pos: N/A "
+    else:
+        pos_str = f" Ln {real_pos[0]}, Col {real_pos[1]} "
 
     status_color = curses.color_pair(3) | curses.A_REVERSE | curses.A_BOLD
     try:
@@ -316,7 +337,25 @@ def draw_footer_status(stdscr, max_y, max_x, real_pos):
         start_x = max_x - len(pos_str)
         if start_x >= 0:
             stdscr.addstr(max_y - 1, start_x, pos_str, status_color)
-    except curses.error: pass
+    except curses.error:
+        pass
+
+
+def get_visual_width(text):
+    """计算字符串在终端显示的视觉宽度"""
+    width = 0
+    for char in text:
+        # 判断东亚字符宽度
+        # 'W' (Wide) 和 'F' (Full-width) 通常占 2 格
+        if unicodedata.east_asian_width(char) in ('W', 'F'):
+            width += 2
+        elif char == '	':
+            # 简单处理：Tab 算 8 格（如果需要完美对齐需结合 current_x，但在 diff 显示中通常够用）
+            width += 8
+        else:
+            width += 1
+    return width
+
 
 def main(stdscr, repo_path, rel_path, abs_path):
     curses.start_color()
@@ -329,10 +368,10 @@ def main(stdscr, repo_path, rel_path, abs_path):
     curses.init_pair(3, curses.COLOR_CYAN, -1)
 
     # 4-7: 聚焦模式 (删除/新增)
-    curses.init_pair(4, curses.COLOR_BLACK, curses.COLOR_RED) # 删除标记
-    curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_RED) # 删除内容
-    curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_GREEN) # 新增标记
-    curses.init_pair(7, curses.COLOR_WHITE, curses.COLOR_GREEN) # 新增内容
+    curses.init_pair(4, curses.COLOR_BLACK, curses.COLOR_RED)  # 删除标记
+    curses.init_pair(5, curses.COLOR_WHITE, curses.COLOR_RED)  # 删除内容
+    curses.init_pair(6, curses.COLOR_BLACK, curses.COLOR_GREEN)  # 新增标记
+    curses.init_pair(7, curses.COLOR_WHITE, curses.COLOR_GREEN)  # 新增内容
 
     # === 8-10: 移动 (Move) 配色 ===
     # 8: Unfocused Move (Blue text)
@@ -395,7 +434,7 @@ def main(stdscr, repo_path, rel_path, abs_path):
         if scroll_offset < 0: scroll_offset = 0
 
         draw_header(stdscr, max_x, rel_path,
-                    current_idx=(current_idx+1 if target_id else 0),
+                    current_idx=(current_idx + 1 if target_id else 0),
                     total_changes=(len(change_ids) if target_id else 0))
 
         for i in range(page_size):
@@ -428,20 +467,21 @@ def main(stdscr, repo_path, rel_path, abs_path):
                         # 即使聚焦，也按普通文本绘制 (无背景色)
                         try:
                             stdscr.addstr(draw_y, current_x, text_to_draw, curses.color_pair(0))
-                            current_x += len(text_to_draw)
-                        except curses.error: pass
+                            current_x += get_visual_width(text_to_draw)
+                        except curses.error:
+                            pass
 
                     elif color_code in [1, 2, 31, 32]:
                         # === 真正需要高亮的部分 (移动首尾、删除、新增) ===
 
                         # 定义配色对 (Marker, Content)
-                        if color_code == 31 or color_code == 32: # Move
-                            marker_pair = curses.color_pair(10) | curses.A_BOLD # Black on Blue
-                            content_pair = curses.color_pair(9) # White on Blue
-                        elif color_code == 1: # Delete
+                        if color_code == 31 or color_code == 32:  # Move
+                            marker_pair = curses.color_pair(10) | curses.A_BOLD  # Black on Blue
+                            content_pair = curses.color_pair(9)  # White on Blue
+                        elif color_code == 1:  # Delete
                             marker_pair = curses.color_pair(4) | curses.A_BOLD
                             content_pair = curses.color_pair(5)
-                        elif color_code == 2: # Add
+                        elif color_code == 2:  # Add
                             marker_pair = curses.color_pair(6) | curses.A_BOLD
                             content_pair = curses.color_pair(7)
 
@@ -454,7 +494,8 @@ def main(stdscr, repo_path, rel_path, abs_path):
                                     stdscr.addstr(draw_y, current_x, temp_text[:2], marker_pair)
                                     current_x += 2
                                     temp_text = temp_text[2:]
-                                except curses.error: pass
+                                except curses.error:
+                                    pass
                                 break
 
                         # 绘制后缀: -], +}, <), >)
@@ -469,54 +510,62 @@ def main(stdscr, repo_path, rel_path, abs_path):
                         if temp_text:
                             try:
                                 stdscr.addstr(draw_y, current_x, temp_text, content_pair)
-                                current_x += len(temp_text)
-                            except curses.error: pass
+                                current_x += get_visual_width(temp_text)
+                            except curses.error:
+                                pass
 
                         # 绘制后缀
                         if suffix:
                             try:
                                 stdscr.addstr(draw_y, current_x, suffix, marker_pair)
-                                current_x += len(suffix)
-                            except curses.error: pass
+                                current_x += get_visual_width(suffix)
+                            except curses.error:
+                                pass
 
                     else:
                         # 理论上不应该进入这里，除非是 Type 0 且 token_id != 0
                         try:
                             stdscr.addstr(draw_y, current_x, text_to_draw, curses.color_pair(0))
-                            current_x += len(text_to_draw)
-                        except curses.error: pass
+                            current_x += get_visual_width(text_to_draw)
+                        except curses.error:
+                            pass
 
                 # 2. 非聚焦状态
                 else:
-                    if color_code == 31 or color_code == 32: # Move Text
-                        attrs = curses.color_pair(8) | curses.A_BOLD # Blue
-                    elif color_code == 33: # Move Context
-                        attrs = curses.color_pair(0) # Normal
+                    if color_code == 31 or color_code == 32:  # Move Text
+                        attrs = curses.color_pair(8) | curses.A_BOLD  # Blue
+                    elif color_code == 33:  # Move Context
+                        attrs = curses.color_pair(0)  # Normal
                     else:
                         attrs = curses.color_pair(color_code)
 
                     try:
                         stdscr.addstr(draw_y, current_x, text_to_draw, attrs)
-                        current_x += len(text_to_draw)
-                    except curses.error: pass
+                        current_x += get_visual_width(text_to_draw)
+                    except curses.error:
+                        pass
 
         draw_footer_status(stdscr, max_y, max_x, current_real_pos)
         stdscr.refresh()
 
         key = stdscr.getch()
 
-        if key == ord('q'): return False
-        elif key == 27: return True
+        if key == ord('q'):
+            return False
+        elif key == 27:
+            return True
         elif key == curses.KEY_RIGHT or key == ord('l'):
             if current_idx < len(change_ids) - 1:
                 current_idx += 1
                 auto_scroll = True
-            else: curses.beep()
+            else:
+                curses.beep()
         elif key == curses.KEY_LEFT or key == ord('h'):
             if current_idx > 0:
                 current_idx -= 1
                 auto_scroll = True
-            else: curses.beep()
+            else:
+                curses.beep()
         elif key == curses.KEY_DOWN or key == ord('j'):
             scroll_offset += 1
             auto_scroll = False
@@ -529,6 +578,7 @@ def main(stdscr, repo_path, rel_path, abs_path):
         elif key == curses.KEY_PPAGE:
             scroll_offset -= page_size
             auto_scroll = False
+
 
 if __name__ == "__main__":
     first_run = True
@@ -552,17 +602,23 @@ if __name__ == "__main__":
                     if os.path.exists(target): break
                     print(f"错误: 文件 '{target}' 不存在，请重试。")
                 except KeyboardInterrupt:
-                    print("\n退出。"); sys.exit(0)
+                    print("\n退出。");
+                    sys.exit(0)
         first_run = False
         abs_file_path = os.path.abspath(target)
         git_root = find_git_root(os.path.dirname(abs_file_path))
         if not git_root:
             print(f"错误: 文件 '{target}' 不在 Git 仓库中。")
-            if cli_arg_used: sys.exit(1)
-            else: continue
+            if cli_arg_used:
+                sys.exit(1)
+            else:
+                continue
         rel_path = os.path.relpath(abs_file_path, git_root)
         try:
             should_continue = curses.wrapper(main, git_root, rel_path, abs_file_path)
-            if not should_continue: break
-            else: cli_arg_used = False; pass
-        except Exception as e: print(f"程序运行出错: {e}"); break
+            if not should_continue:
+                break
+            else:
+                cli_arg_used = False; pass
+        except Exception as e:
+            print(f"程序运行出错: {e}"); break
