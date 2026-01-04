@@ -191,23 +191,16 @@ class DiffViewer(Static):
         width = self.size.width
         if width == 0:
             width = self.app.size.width
-        # 减去 padding (CSS中定义 padding: 0 1，即左右各1)
         return max(1, width - 2)
 
     def _split_text_by_cell_width(self, text, max_len):
-        """
-        手动截断字符串，使其视觉宽度不超过 max_len。
-        这是手动实现 textwrap 逻辑的关键，支持中文字符。
-        返回: (first_part, remainder, visual_width_of_first)
-        """
+        """手动截断字符串，使其视觉宽度不超过 max_len"""
         if not text: return "", "", 0
 
-        # 快速检查：如果总长度小于限制，直接返回
         total_w = cell_len(text)
         if total_w <= max_len:
             return text, "", total_w
 
-        # 慢速逐字检查
         current_w = 0
         for i, char in enumerate(text):
             char_w = cell_len(char)
@@ -218,13 +211,6 @@ class DiffViewer(Static):
         return text, "", total_w
 
     def _reflow_text(self, width=None):
-        """
-        手动流式布局引擎。
-        1. 遍历所有 Token
-        2. 手动拼接每一行
-        3. 遇到边界强制换行
-        4. 同时记录 ID 对应的行号
-        """
         if not self.tokens:
             self.update("No content.")
             return
@@ -235,7 +221,7 @@ class DiffViewer(Static):
             width = max(1, width - 2)
 
         final_rich_text = Text()
-        self.line_y_map = {} # 重置映射
+        self.line_y_map = {}
 
         # 样式定义
         style_norm = Style(color="#cccccc")
@@ -247,35 +233,27 @@ class DiffViewer(Static):
         style_add_fo = Style(color="white", bgcolor="#0e4429", bold=True)
         style_move_fo = Style(color="white", bgcolor="#033d8b", bold=True)
 
-        # 布局状态变量
         current_line_visual_width = 0
         current_line_index = 0
 
-        # 辅助函数：向当前布局追加文本片段
         def append_span(text_str, style_obj, change_id):
             nonlocal current_line_visual_width, current_line_index
 
-            # 如果 change_id 有效，记录它所在的行号
             if change_id and change_id != 0 and change_id not in self.line_y_map:
                 self.line_y_map[change_id] = current_line_index
 
             remaining_text = text_str
             while remaining_text:
-                # 计算当前行还能放多少宽度的字
                 space_left = width - current_line_visual_width
 
-                # 如果当前行已满，强制换行
                 if space_left <= 0:
                     final_rich_text.append("\n")
                     current_line_index += 1
                     current_line_visual_width = 0
                     space_left = width
 
-                # 截取适合当前行剩余空间的文本
-                # 这里实现了"任意位置换行"，不考虑单词边界
                 chunk, left_over, chunk_width = self._split_text_by_cell_width(remaining_text, space_left)
 
-                # 如果连一个字都放不下（chunk为空但还有剩余），强制换行再试
                 if not chunk and remaining_text:
                     final_rich_text.append("\n")
                     current_line_index += 1
@@ -283,28 +261,19 @@ class DiffViewer(Static):
                     space_left = width
                     chunk, left_over, chunk_width = self._split_text_by_cell_width(remaining_text, space_left)
 
-                # 追加当前块
                 final_rich_text.append(chunk, style_obj)
                 current_line_visual_width += chunk_width
                 remaining_text = left_over
 
-                # 如果切分导致换行（还有剩余文本），手动加换行符
-                # 注意：split_text_by_cell_width 返回剩余文本意味着需要换行
-                # 但我们需要在外层循环处理，这里如果还有 remaining_text，说明要进入下一次 while 循环
-                # 下一次 while 循环一开始就会检测 space_left 并处理换行
-
-        # === 主循环：处理所有 Token ===
         for t_type, t_text, t_id in self.tokens:
             is_focused = (t_id == self.active_change_id and t_id is not None and t_id != 0)
 
-            # 准备前缀后缀
             prefix, suffix = "", ""
             if t_type == 1: prefix, suffix = "[-", "-]"
             elif t_type == 2: prefix, suffix = "{+", "+}"
             elif t_type == 31: prefix, suffix = "(<", "<)"
             elif t_type == 32: prefix, suffix = "(>", ">)"
 
-            # 确定样式
             current_style = style_norm
             if is_focused:
                 if t_type == 1: current_style = style_del_fo
@@ -315,16 +284,11 @@ class DiffViewer(Static):
                 elif t_type == 2: current_style = style_add_un
                 elif t_type in [31, 32]: current_style = style_move_un
 
-            # 组合完整文本（前缀+内容+后缀）
-            # 对于 Normal 和 Context 类型，prefix/suffix 为空
             full_content = prefix + t_text + suffix
 
-            # 处理硬换行符 (Raw Text 里的 \n)
-            # 我们需要把原始文本按 \n 切开，每一段单独处理布局
             lines = full_content.split('\n')
             for i, line_content in enumerate(lines):
                 if i > 0:
-                    # 原始文本里有换行，意味着强制另起一行
                     final_rich_text.append("\n")
                     current_line_index += 1
                     current_line_visual_width = 0
@@ -335,9 +299,6 @@ class DiffViewer(Static):
         self.update(final_rich_text)
 
     def get_target_scroll_y(self, target_id):
-        """
-        直接从布局过程中生成的 Map 获取行号，精准且快速。
-        """
         return self.line_y_map.get(target_id, 0)
 
 
@@ -367,6 +328,11 @@ class PathInputScreen(Screen):
     }
     """
 
+    # 【修改点 1】新增按键绑定：Esc 退出程序
+    BINDINGS = [
+        Binding("escape", "quit_app", "Quit Application"),
+    ]
+
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Label("请输入文件路径 (Git Repository):")
@@ -392,11 +358,16 @@ class PathInputScreen(Screen):
 
         self.dismiss((git_root, abs_path))
 
+    # 【修改点 1】实现退出动作
+    def action_quit_app(self):
+        self.app.exit()
+
 
 class DiffScreen(Screen):
+    # 【修改点 2】修改按键绑定：q 换文件，escape 退出程序
     BINDINGS = [
-        Binding("q", "quit_app", "Quit"),
-        Binding("escape", "new_file", "New File"),
+        Binding("q", "new_file", "Open New File"),       # 此时 q 返回输入界面
+        Binding("escape", "quit_app", "Quit"),           # 此时 esc 直接退出
         Binding("left", "prev_change", "Prev Change"),
         Binding("right", "next_change", "Next Change"),
         Binding("h", "prev_change", "Prev Change"),
@@ -447,14 +418,11 @@ class DiffScreen(Screen):
 
         self.title = f"{self.rel_path} [{self.current_idx + 1}/{len(self.change_ids)}]"
 
-        # 1. 获取目标内容的起始视觉行号 (O(1) 查找)
         target_visual_y = viewer.get_target_scroll_y(target_id)
 
-        # 2. 获取滚动容器的高度
         container = self.query_one("#scroll_container")
         container_height = container.size.height
 
-        # 3. 计算居中滚动
         if container_height > 0:
             scroll_target = target_visual_y - (container_height // 2)
         else:
