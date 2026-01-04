@@ -220,7 +220,10 @@ class DiffViewer(Static):
         else:
             width = max(1, width - 2)
 
-        final_rich_text = Text()
+        # 【核心修复】初始化时添加 no_wrap=True
+        # 这告诉 Rich：即使你觉得这行太长，也不要折行，相信我的计算。
+        # 这样就避免了 Layout 临界值导致的“双重折行闪烁”问题。
+        final_rich_text = Text(no_wrap=True)
         self.line_y_map = {}
 
         # 样式定义
@@ -237,37 +240,33 @@ class DiffViewer(Static):
         current_line_visual_width = 0
         current_line_index = 0
 
-        # === 核心修复逻辑 ===
         def append_span(text_str, style_obj, change_id):
             nonlocal current_line_visual_width, current_line_index
 
             remaining_text = text_str
-            is_first_chunk = True # 标记是否是该 Token 的第一段（用于记录起始行号）
+            is_first_chunk = True
 
             while remaining_text:
                 space_left = width - current_line_visual_width
 
-                # 情况1：当前行已经完全满了（或者因为之前的逻辑导致 space_left <= 0）
+                # 情况1：当前行已满
                 if space_left <= 0:
                     final_rich_text.append("\n")
                     current_line_index += 1
                     current_line_visual_width = 0
                     space_left = width
 
-                # 尝试切割文本
                 chunk, left_over, chunk_width = self._split_text_by_cell_width(remaining_text, space_left)
 
-                # 情况2：当前行虽然有空间（比如剩余1格），但下一个字符是宽字符（占2格）
-                # 导致切出来的 chunk 为空，但还有 remaining_text
+                # 情况2：剩余空间不够放下一个宽字符
                 if not chunk and remaining_text:
                     final_rich_text.append("\n")
                     current_line_index += 1
                     current_line_visual_width = 0
                     space_left = width
-                    # 在新的一行重新切割
                     chunk, left_over, chunk_width = self._split_text_by_cell_width(remaining_text, space_left)
 
-                # === 关键点：在确定了 chunk 确实能放入当前 current_line_index 之后，才记录 Map ===
+                # 记录行号 (在确定放入位置后)
                 if is_first_chunk and change_id and change_id != 0 and change_id not in self.line_y_map:
                     self.line_y_map[change_id] = current_line_index
                     is_first_chunk = False
@@ -298,11 +297,9 @@ class DiffViewer(Static):
 
             full_content = prefix + t_text + suffix
 
-            # 处理原始文本中的硬换行
             lines = full_content.split('\n')
             for i, line_content in enumerate(lines):
                 if i > 0:
-                    # 遇到硬换行符，强制换行
                     final_rich_text.append("\n")
                     current_line_index += 1
                     current_line_visual_width = 0
@@ -310,8 +307,7 @@ class DiffViewer(Static):
                 if line_content:
                     append_span(line_content, current_style, t_id)
                 elif i == 0 and not line_content and len(lines) > 1:
-                    # 处理特殊情况：如果Token以换行符开头 (空内容 + 换行)
-                    # 需要确保 id 也能被记录（如果它是 change 的话）
+                    # 处理空行开头的 ID 映射
                     if t_id and t_id != 0 and t_id not in self.line_y_map:
                          self.line_y_map[t_id] = current_line_index
 
