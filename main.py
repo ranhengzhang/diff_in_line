@@ -10,10 +10,10 @@ from textual.binding import Binding
 from textual.reactive import reactive
 from rich.text import Text
 from rich.style import Style
-from rich.cells import cell_len  # 引入 Rich 的字符宽度计算工具
+from rich.cells import cell_len
 
 # ==========================================
-# 核心逻辑 (保持不变)
+# 核心逻辑
 # ==========================================
 
 def find_git_root(start_path):
@@ -158,7 +158,7 @@ def parse_diff_to_tokens(raw_text):
 # ==========================================
 
 class DiffViewer(Static):
-    """自定义 Diff 显示组件，使用手动计算的硬折行"""
+    """自定义 Diff 显示组件，使用手动计算的硬折行，且锁定宽度防止闪烁"""
     DEFAULT_CSS = """
     DiffViewer {
         width: 100%;
@@ -172,7 +172,8 @@ class DiffViewer(Static):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.line_y_map = {} # 缓存: Change ID -> 视觉行号
+        self.line_y_map = {}
+        self._cached_width = None
 
     def watch_tokens(self, tokens):
         """当数据改变时，重绘"""
@@ -184,13 +185,19 @@ class DiffViewer(Static):
 
     def on_resize(self, event):
         """核心：当尺寸改变时，手动重新计算每一行的断点"""
-        self._reflow_text(width=event.size.width)
+        self._cached_width = event.size.width
+        self._reflow_text()
 
-    def _get_available_width(self):
+    def _get_working_width(self):
         """获取用于文本显示的有效宽度"""
-        width = self.size.width
-        if width == 0:
-            width = self.app.size.width
+        if self._cached_width is not None and self._cached_width > 0:
+            width = self._cached_width
+        else:
+            width = self.size.width
+            if width == 0:
+                width = self.app.size.width
+            self._cached_width = width
+
         return max(1, width - 2)
 
     def _split_text_by_cell_width(self, text, max_len):
@@ -210,19 +217,12 @@ class DiffViewer(Static):
 
         return text, "", total_w
 
-    def _reflow_text(self, width=None):
+    def _reflow_text(self):
         if not self.tokens:
             self.update("No content.")
             return
 
-        if width is None:
-            width = self._get_available_width()
-        else:
-            width = max(1, width - 2)
-
-        # 【核心修复】初始化时添加 no_wrap=True
-        # 这告诉 Rich：即使你觉得这行太长，也不要折行，相信我的计算。
-        # 这样就避免了 Layout 临界值导致的“双重折行闪烁”问题。
+        width = self._get_working_width()
         final_rich_text = Text(no_wrap=True)
         self.line_y_map = {}
 
@@ -495,7 +495,7 @@ class GitDiffApp(App):
         height: 1fr;
         overflow-y: scroll;
         border: solid $secondary;
-        scrollbar-gutter: stable;
+        scrollbar-size-vertical: 0;
     }
     """
 
