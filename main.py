@@ -233,38 +233,50 @@ class DiffViewer(Static):
         style_add_fo = Style(color="white", bgcolor="#0e4429", bold=True)
         style_move_fo = Style(color="white", bgcolor="#033d8b", bold=True)
 
+        # 布局状态变量
         current_line_visual_width = 0
         current_line_index = 0
 
+        # === 核心修复逻辑 ===
         def append_span(text_str, style_obj, change_id):
             nonlocal current_line_visual_width, current_line_index
 
-            if change_id and change_id != 0 and change_id not in self.line_y_map:
-                self.line_y_map[change_id] = current_line_index
-
             remaining_text = text_str
+            is_first_chunk = True # 标记是否是该 Token 的第一段（用于记录起始行号）
+
             while remaining_text:
                 space_left = width - current_line_visual_width
 
+                # 情况1：当前行已经完全满了（或者因为之前的逻辑导致 space_left <= 0）
                 if space_left <= 0:
                     final_rich_text.append("\n")
                     current_line_index += 1
                     current_line_visual_width = 0
                     space_left = width
 
+                # 尝试切割文本
                 chunk, left_over, chunk_width = self._split_text_by_cell_width(remaining_text, space_left)
 
+                # 情况2：当前行虽然有空间（比如剩余1格），但下一个字符是宽字符（占2格）
+                # 导致切出来的 chunk 为空，但还有 remaining_text
                 if not chunk and remaining_text:
                     final_rich_text.append("\n")
                     current_line_index += 1
                     current_line_visual_width = 0
                     space_left = width
+                    # 在新的一行重新切割
                     chunk, left_over, chunk_width = self._split_text_by_cell_width(remaining_text, space_left)
+
+                # === 关键点：在确定了 chunk 确实能放入当前 current_line_index 之后，才记录 Map ===
+                if is_first_chunk and change_id and change_id != 0 and change_id not in self.line_y_map:
+                    self.line_y_map[change_id] = current_line_index
+                    is_first_chunk = False
 
                 final_rich_text.append(chunk, style_obj)
                 current_line_visual_width += chunk_width
                 remaining_text = left_over
 
+        # 遍历 Token
         for t_type, t_text, t_id in self.tokens:
             is_focused = (t_id == self.active_change_id and t_id is not None and t_id != 0)
 
@@ -286,15 +298,22 @@ class DiffViewer(Static):
 
             full_content = prefix + t_text + suffix
 
+            # 处理原始文本中的硬换行
             lines = full_content.split('\n')
             for i, line_content in enumerate(lines):
                 if i > 0:
+                    # 遇到硬换行符，强制换行
                     final_rich_text.append("\n")
                     current_line_index += 1
                     current_line_visual_width = 0
 
                 if line_content:
                     append_span(line_content, current_style, t_id)
+                elif i == 0 and not line_content and len(lines) > 1:
+                    # 处理特殊情况：如果Token以换行符开头 (空内容 + 换行)
+                    # 需要确保 id 也能被记录（如果它是 change 的话）
+                    if t_id and t_id != 0 and t_id not in self.line_y_map:
+                         self.line_y_map[t_id] = current_line_index
 
         self.update(final_rich_text)
 
