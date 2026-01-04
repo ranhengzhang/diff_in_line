@@ -370,7 +370,7 @@ class PathInputScreen(Screen):
     def compose(self) -> ComposeResult:
         with Vertical():
             yield Label("请输入文件路径 (Git Repository):")
-            yield Input(placeholder="/path/to/file", id="path_input")
+            yield Input(placeholder="/path/to/file", id="path_input", max_length=4096)
             yield Label("", id="error_msg")
 
     def on_input_submitted(self, message: Input.Submitted):
