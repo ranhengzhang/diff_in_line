@@ -236,6 +236,10 @@ class DiffViewer(Static):
         style_add_fo = Style(color="white", bgcolor="#0e4429", bold=True)
         style_move_fo = Style(color="white", bgcolor="#033d8b", bold=True)
 
+        style_del_pair_fo = Style(color="black", bgcolor="#a01818", bold=True)
+        style_add_pair_fo = Style(color="black", bgcolor="#0e4429", bold=True)
+        style_move_pair_fo = Style(color="black", bgcolor="#033d8b", bold=True)
+
         # 布局状态变量
         current_line_visual_width = 0
         current_line_index = 0
@@ -285,19 +289,32 @@ class DiffViewer(Static):
             elif t_type == 31: prefix, suffix = "(<", "<)"
             elif t_type == 32: prefix, suffix = "(>", ">)"
 
-            current_style = style_norm
+            main_style = style_norm
+            pair_style = style_norm
             if is_focused:
-                if t_type == 1: current_style = style_del_fo
-                elif t_type == 2: current_style = style_add_fo
-                elif t_type in [31, 32]: current_style = style_move_fo
+                if t_type == 1:
+                    main_style = style_del_fo
+                    pair_style = style_del_pair_fo
+                elif t_type == 2:
+                    main_style = style_add_fo
+                    pair_style = style_add_pair_fo
+                elif t_type in [31, 32]:
+                    main_style = style_move_fo
+                    pair_style = style_move_pair_fo
             else:
-                if t_type == 1: current_style = style_del_un
-                elif t_type == 2: current_style = style_add_un
-                elif t_type in [31, 32]: current_style = style_move_un
+                if t_type == 1:
+                    main_style = style_del_un
+                    pair_style = style_del_un
+                elif t_type == 2:
+                    main_style = style_add_un
+                    pair_style = style_add_un
+                elif t_type in [31, 32]:
+                    main_style = style_move_un
+                    pair_style = style_move_un
 
-            full_content = prefix + t_text + suffix
-
-            lines = full_content.split('\n')
+            lines = t_text.split('\n')
+            if prefix:
+                append_span(prefix, pair_style, t_id)
             for i, line_content in enumerate(lines):
                 if i > 0:
                     final_rich_text.append("\n")
@@ -305,11 +322,13 @@ class DiffViewer(Static):
                     current_line_visual_width = 0
 
                 if line_content:
-                    append_span(line_content, current_style, t_id)
+                    append_span(line_content, main_style, t_id)
                 elif i == 0 and not line_content and len(lines) > 1:
                     # 处理空行开头的 ID 映射
                     if t_id and t_id != 0 and t_id not in self.line_y_map:
                          self.line_y_map[t_id] = current_line_index
+            if suffix:
+                append_span(suffix, pair_style, t_id)
 
         self.update(final_rich_text)
 
